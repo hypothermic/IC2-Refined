@@ -1,5 +1,8 @@
 package ic2.energy;
 
+import ic2.api.Direction;
+import ic2.api.IEnergySink;
+import ic2.api.IEnergySource;
 import net.minecraft.server.TileEntity;
 
 import java.lang.ref.Reference;
@@ -16,6 +19,9 @@ import java.util.stream.Stream;
  */
 public class EnergyCluster {
 
+	/**
+	 * All of the tiles connected to this cluster
+	 */
 	private final List<WeakReference<TileEntity>> tiles;
 
 	public EnergyCluster() {
@@ -33,8 +39,7 @@ public class EnergyCluster {
 	}
 
 	public void removeTile(TileEntity tile) {
-
-		// If tile wasn't removed, return
+		// Remove the tile from the list. If it cannot be removed for some reason, return.
 		if (!tiles.removeIf(ref -> ref.get() == null || Objects.equals(ref.get(), tile))) {
 			return;
 		}
@@ -58,8 +63,22 @@ public class EnergyCluster {
 		return results;
 	}
 
-	public void emitEnergyFrom(TileEntity tile, int energyAmount) {
-		Logger.getAnonymousLogger().info("TODO emit energy");
+	public int emitEnergyFrom(TileEntity tile, IEnergySource source, int energyAmount) {
+		// TODO we should probably cache the sinks list because it doesn't change unless a tile is added/removed.
+		List<IEnergySink> sinks = tiles.stream()
+				.filter(ref -> ref.get() != null && ref.get() instanceof IEnergySink)
+				.map(Reference::get)
+				.map(sink -> ((IEnergySink) sink))
+				.filter(sink -> sink.demandsEnergy())
+				.collect(Collectors.toList());
+
+		if (sinks.size() > 0) {
+			int amountToEachSink = energyAmount / sinks.size();
+
+			sinks.forEach(sink -> sink.injectEnergy(Direction.ZN, amountToEachSink));
+		}
+
+		return energyAmount;
 	}
 
 	public boolean containsTile(TileEntity tile) {

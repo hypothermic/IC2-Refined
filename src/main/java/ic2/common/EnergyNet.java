@@ -20,15 +20,10 @@ public final class EnergyNet {
   private static final Map<World, EnergyNet> worldToEnergyNetMap = new HashMap<>();
 
   public static EnergyNet getForWorld(World world) {
-    if (world == null) {
-      System.out.println("[IC2] EnergyNet.getForWorld: world = null, bad things may happen..");
-      return null;
-    } else {
-      if (!worldToEnergyNetMap.containsKey(world)) {
-        worldToEnergyNetMap.put(world, new EnergyNet(world));
-      }
-      return worldToEnergyNetMap.get(world);
+    if (!worldToEnergyNetMap.containsKey(world)) {
+      worldToEnergyNetMap.put(world, new EnergyNet(world));
     }
+    return worldToEnergyNetMap.get(world);
   }
 
   public static void onTick(World world) { //Shock entities
@@ -128,9 +123,9 @@ public final class EnergyNet {
 
     TileEntity tile = (TileEntity) ienergysource;
 
-    getCluster(tile).ifPresent(cluster -> cluster.emitEnergyFrom(tile, energyAmount));
-
-    return 0; // TODO return correct amount
+    return getCluster(tile)
+            .map(cluster -> cluster.emitEnergyFrom(tile, ienergysource, energyAmount))
+            .orElse(energyAmount);
 /*
     else {
       if (!energySourceToEnergyPathMap.containsKey(ienergysource)) {
