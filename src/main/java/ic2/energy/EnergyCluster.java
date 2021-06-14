@@ -30,11 +30,9 @@ public class EnergyCluster {
 
 	public void addTile(TileEntity tile) {
 		tiles.add(new WeakReference<>(tile));
-		Logger.getAnonymousLogger().info("Added tile " + tile.toString() + " to cluster with after size " + tiles.size());
 	}
 
 	public void removeTile(TileEntity tile) {
-		Logger.getAnonymousLogger().info("Remove " + tile.toString() + " from cluster with before size" + tiles.size());
 
 		// If tile wasn't removed, return
 		if (!tiles.removeIf(ref -> ref.get() == null || Objects.equals(ref.get(), tile))) {
@@ -90,6 +88,10 @@ public class EnergyCluster {
 
 			return areTilesAdjacent(tile1, tile2);
 		});
+	}
+
+	public long tileAmount() {
+		return tiles.size();
 	}
 
 	public static boolean areTilesAdjacent(TileEntity tile1, TileEntity tile2) {

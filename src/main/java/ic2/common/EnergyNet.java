@@ -101,10 +101,7 @@ public final class EnergyNet {
     }
 
     // Find the cluster that contains this tile, and remove the tile from that cluster
-    clusters.stream()
-            .filter(cluster -> cluster.containsTile(tileEntity))
-            .findFirst()
-            .ifPresent(cluster -> cluster.removeTile(tileEntity));
+    getCluster(tileEntity).ifPresent(cluster -> cluster.removeTile(tileEntity));
   }
 
   public void onTick() {
@@ -118,17 +115,22 @@ public final class EnergyNet {
     entityLivingToShockEnergyMap.clear();
   }
 
+  public Optional<EnergyCluster> getCluster(TileEntity tileEntity) {
+    return clusters.stream()
+            .filter(cluster -> cluster.containsTile(tileEntity))
+            .findFirst();
+  }
+
   public int emitEnergyFrom(IEnergySource ienergysource, int energyAmount) {
     if (ienergysource == null || !ienergysource.isAddedToEnergyNet()) {
       return energyAmount;
     }
 
-    clusters.stream()
-            .filter(cluster -> cluster.containsTile((TileEntity) ienergysource))
-            .findFirst()
-            .ifPresent(cluster -> cluster.emitEnergyFrom((TileEntity) ienergysource, energyAmount));
+    TileEntity tile = (TileEntity) ienergysource;
 
-    return 0;
+    getCluster(tile).ifPresent(cluster -> cluster.emitEnergyFrom(tile, energyAmount));
+
+    return 0; // TODO return correct amount
 /*
     else {
       if (!energySourceToEnergyPathMap.containsKey(ienergysource)) {
