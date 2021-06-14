@@ -1,6 +1,7 @@
 package ic2.common;
 
 import ic2.api.*;
+import ic2.energy.EnergyCluster;
 import ic2.platform.Platform;
 import net.minecraft.server.EntityLiving;
 import net.minecraft.server.TileEntity;
@@ -8,115 +9,127 @@ import net.minecraft.server.World;
 
 import java.util.*;
 import java.util.Map.Entry;
+import java.util.function.BinaryOperator;
+import java.util.function.Function;
+import java.util.logging.Logger;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public final class EnergyNet {
-  public static final double minConductionLoss = 1.0E-4D;
+
   private static final Map<World, EnergyNet> worldToEnergyNetMap = new HashMap<>();
-  private final World world;
-  private final HashMap<IEnergySource, List<EnergyPath>> energySourceToEnergyPathMap = new HashMap<>();
-  private final HashMap<EntityLiving, Integer> entityLivingToShockEnergyMap = new HashMap<>();
-  
-  private EnergyNet(World world) {
-    this.world = world;
-  }
-  
+
   public static EnergyNet getForWorld(World world) {
     if (world == null) {
       System.out.println("[IC2] EnergyNet.getForWorld: world = null, bad things may happen..");
       return null;
-    }
-    else {
+    } else {
       if (!worldToEnergyNetMap.containsKey(world)) {
         worldToEnergyNetMap.put(world, new EnergyNet(world));
       }
       return worldToEnergyNetMap.get(world);
     }
   }
-  
+
   public static void onTick(World world) { //Shock entities
     Platform.profilerStartSection("Shocking");
-    EnergyNet energyNet = getForWorld(world);
-    for (EntityLiving entityLiving : energyNet.entityLivingToShockEnergyMap.keySet()) {
-      int i = (energyNet.entityLivingToShockEnergyMap.get(entityLiving) + 63) / 64;
+    getForWorld(world).onTick(); // moved to instance function
+    Platform.profilerEndSection();
+  }
+
+  private final World world;
+  private final HashMap<EntityLiving, Integer> entityLivingToShockEnergyMap = new HashMap<>();
+  private final Collection<EnergyCluster> clusters = new LinkedList<>();
+
+  private EnergyNet(World world) {
+    this.world = world;
+  }
+
+  public void addTileEntity(TileEntity tileEntity) {
+    // Don't proceed if the tile entity isn't an energy tile or is already added to the "energy net"
+    if (!(tileEntity instanceof IEnergyTile) || ((IEnergyTile) tileEntity).isAddedToEnergyNet()) {
+      return;
+    }
+
+    // Don't proceed if the tile is already referenced in a cluster
+    if (clusters.stream().anyMatch(cluster -> cluster.containsTile(tileEntity))) {
+      return;
+    }
+
+    // Get all clusters which have TileEntities adjacent to the position of the new tile entity
+    List<EnergyCluster> adjacentClusters = clusters
+            .stream()
+            .filter(cluster -> cluster.containsTilesAdjacentTo(tileEntity))
+            .distinct()
+            .collect(Collectors.toList());
+
+    // Depending on how many clusters are adjacent, do something
+    switch (adjacentClusters.size()) {
+      case 0: // no adjacent clusters, create a new one
+        clusters.add(new EnergyCluster(tileEntity));
+        break;
+
+      case 1: // only one cluster, add the tile entity to it.
+        adjacentClusters.get(0).addTile(tileEntity);
+        break;
+
+      default: // multiple clusters, merge them into one
+        EnergyCluster destination = adjacentClusters.get(0);
+        List<EnergyCluster> sources = clusters.stream()
+                .filter(cluster -> !cluster.equals(destination))
+                .collect(Collectors.toList());
+
+        // Steal all the tiles from all clusters and add them to the destination
+        sources.stream()
+                .flatMap(cluster -> cluster.stealTiles().stream())
+                .forEach(destination::addTile);
+
+        // Remove the merged clusters and let them be garbage collected
+        clusters.removeAll(sources);
+
+        // Add the new tile
+        destination.addTile(tileEntity);
+
+        break;
+    }
+  }
+
+  public void removeTileEntity(TileEntity tileEntity) {
+    // Don't proceed if the tile entity isn't an energy tile or is not already added to the "energy net"
+    if (!(tileEntity instanceof IEnergyTile) || !((IEnergyTile) tileEntity).isAddedToEnergyNet()) {
+      return;
+    }
+
+    // Find the cluster that contains this tile, and remove the tile from that cluster
+    clusters.stream()
+            .filter(cluster -> cluster.containsTile(tileEntity))
+            .findFirst()
+            .ifPresent(cluster -> cluster.removeTile(tileEntity));
+  }
+
+  public void onTick() {
+    for (EntityLiving entityLiving : entityLivingToShockEnergyMap.keySet()) {
+      int i = (entityLivingToShockEnergyMap.get(entityLiving) + 63) / 64;
+
       if (entityLiving.isAlive()) {
         entityLiving.damageEntity(IC2DamageSource.electricity, i);
       }
     }
-    energyNet.entityLivingToShockEnergyMap.clear();
-    Platform.profilerEndSection();
+    entityLivingToShockEnergyMap.clear();
   }
-  
-  public void addTileEntity(TileEntity tileentity) {
-    if (tileentity instanceof IEnergyTile && !((IEnergyTile) tileentity).isAddedToEnergyNet()) {
-      if (tileentity instanceof IEnergyAcceptor) {
-        List<EnergyPath> list = discover(tileentity, true, Integer.MAX_VALUE);
-        for (EnergyPath energyPath : list) {
-          IEnergySource ienergysource = (IEnergySource) energyPath.target;
-          if (energySourceToEnergyPathMap.containsKey(ienergysource) &&
-              (double) ienergysource.getMaxEnergyOutput() > energyPath.loss) {
-            energySourceToEnergyPathMap.remove(ienergysource);
-          }
-        }
-      }
-    }
-    else {
-      if (tileentity instanceof IEnergyTile) {
-        ((IEnergyTile) tileentity).isAddedToEnergyNet();
-      }
-    }
-  }
-  
-  public void removeTileEntity(TileEntity tileEntity) {
-    if (tileEntity instanceof IEnergyTile && ((IEnergyTile) tileEntity).isAddedToEnergyNet()) {
-      if (tileEntity instanceof IEnergyAcceptor) {
-        for (EnergyPath energyPath : discover(tileEntity, true, Integer.MAX_VALUE)) {
-          IEnergySource iEnergySource = (IEnergySource) energyPath.target;
-          if (energySourceToEnergyPathMap.containsKey(iEnergySource) &&
-              iEnergySource.getMaxEnergyOutput() > energyPath.loss) {
-            energySourceToEnergyPathMap.remove(iEnergySource);
-          }
-        }
-        List<EnergyPath> energyPathList = discover(tileEntity, true, Integer.MAX_VALUE);
-        Iterator<EnergyPath> energyPathIterator = energyPathList.iterator();
-        label55:
-        while (true) {
-          while (true) {
-            EnergyPath energyPath;
-            IEnergySource iEnergySource;
-            do {
-              do {
-                if (!energyPathIterator.hasNext()) {
-                  break label55;
-                }
-                energyPath = energyPathIterator.next();
-                iEnergySource = (IEnergySource) energyPath.target;
-              } while (!energySourceToEnergyPathMap.containsKey(iEnergySource));
-            } while ((double) iEnergySource.getMaxEnergyOutput() <= energyPath.loss);
-            if (tileEntity instanceof IEnergyConductor) {
-              energySourceToEnergyPathMap.remove(iEnergySource);
-            }
-            else {
-              Iterator<EnergyPath> iterator1 = energySourceToEnergyPathMap.get(iEnergySource).iterator();
-              while (iterator1.hasNext()) {
-                if ((iterator1.next()).target == tileEntity) {
-                  iterator1.remove();
-                  break;
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    else if (tileEntity instanceof IEnergySource) {
-      energySourceToEnergyPathMap.remove(tileEntity);
-    }
-  }
-  
-  public int emitEnergyFrom(IEnergySource ienergysource, int i) {
+
+  public int emitEnergyFrom(IEnergySource ienergysource, int energyAmount) {
     if (ienergysource == null || !ienergysource.isAddedToEnergyNet()) {
-      return i;
+      return energyAmount;
     }
+
+    clusters.stream()
+            .filter(cluster -> cluster.containsTile((TileEntity) ienergysource))
+            .findFirst()
+            .ifPresent(cluster -> cluster.emitEnergyFrom((TileEntity) ienergysource, energyAmount));
+
+    return 0;
+/*
     else {
       if (!energySourceToEnergyPathMap.containsKey(ienergysource)) {
         energySourceToEnergyPathMap
@@ -124,7 +137,7 @@ public final class EnergyNet {
       }
       if (energySourceToEnergyPathMap.get(ienergysource).size() < 1) { // Remove empty entries
         energySourceToEnergyPathMap.remove(ienergysource);
-        return i;
+        return energyAmount;
       }
       else {
         energySourceToEnergyPathMap.get(ienergysource).removeIf(energyPath -> energyPath.conductors == null
@@ -144,7 +157,7 @@ public final class EnergyNet {
           {
             vector.add(energypath);
           }
-          if (vector.size() >= i) {
+          if (vector.size() >= energyAmount) {
             break;
           }
         }
@@ -159,17 +172,17 @@ public final class EnergyNet {
           int l;
           do {
             if (!iterator1.hasNext()) {
-              return i - j;
+              return energyAmount - j;
             }
             energypath1 = iterator1.next();
             ienergysink1 = (IEnergySink) energypath1.target;
-            k = (int) Math.floor((double) Math.round((double) i / d / energypath1.loss * 100000.0D) / 100000.0D);
+            k = (int) Math.floor((double) Math.round((double) energyAmount / d / energypath1.loss * 100000.0D) / 100000.0D);
             l = (int) Math.floor(energypath1.loss);
           } while (k <= l);
           int i1 = ienergysink1.injectEnergy(energypath1.targetDirection, k - l);
           j += k - i1;
           conducted = k - l - i1;
-          energypath1.totalEnergyConducted += conducted;
+          energypath1.totalEnergyConducted += conducted;*/
 //          if (conducted > energypath1.minInsulationEnergyAbsorption) {
 //            List<EntityLiving> list = world.a(EntityLiving.class, AxisAlignedBB
 //                .a(energypath1.minX - 1, energypath1.minY - 1, energypath1.minZ - 1,
@@ -209,18 +222,18 @@ public final class EnergyNet {
 //              }
 //            }
 //          }
-        } while (conducted < energypath1.minConductorBreakdownEnergy);
+/*        } while (conducted < energypath1.minConductorBreakdownEnergy);
         for (IEnergyConductor iEnergyConductor : energypath1.conductors) {
           if (conducted >= iEnergyConductor.getConductorBreakdownEnergy()) {
             iEnergyConductor.removeConductor();
           }
         }
       }
-    }
+    }*/
   }
-  
+
   public long getTotalEnergyConducted(TileEntity tileentity) {
-    long l = 0L;
+ /*   long l = 0L;
     if (tileentity instanceof IEnergyConductor || tileentity instanceof IEnergySink) {
       List list = discover(tileentity, true, Integer.MAX_VALUE);
       Iterator iterator1 = list.iterator();
@@ -267,9 +280,11 @@ public final class EnergyNet {
     }
   
     return l;
+    */
+    return 69;
   }
   
-  private List<EnergyPath> discover(TileEntity tileEntity, boolean flag, int i) {
+  /*private List<EnergyPath> discover(TileEntity tileEntity, boolean flag, int i) {
     //newDiscover(tileEntity, flag, i); // Todo: Remove this
     HashMap<TileEntity, EnergyBlockLink> tileEntityEnergyBlockLinkHashMap = new HashMap<>();
     LinkedList<TileEntity> tileEntityLinkedList = new LinkedList<>();
@@ -333,16 +348,19 @@ public final class EnergyNet {
                   energyPath.maxX = Math.max(energyPath.maxX, energyPathTarget.x);
                   energyPath.maxY = Math.max(energyPath.maxY, energyPathTarget.y);
                   energyPath.maxZ = Math.max(energyPath.maxZ, energyPathTarget.z);
-                  
+
+
                   energyPath.conductors.add(iEnergyConductor);
                   
                   energyPath.minInsulationEnergyAbsorption = Math.min(iEnergyConductor.getInsulationEnergyAbsorption(),
                         energyPath.minInsulationEnergyAbsorption);
                   energyPath.minInsulationBreakdownEnergy = Math.min(iEnergyConductor.getInsulationBreakdownEnergy(),
-                        energyPath.minInsulationBreakdownEnergy);
+
+        energyPath.minInsulationBreakdownEnergy);
                   energyPath.minConductorBreakdownEnergy = Math.min(iEnergyConductor.getConductorBreakdownEnergy(),
                         energyPath.minConductorBreakdownEnergy);
-                  
+
+
                   energyBlockLink = tileEntityEnergyBlockLinkHashMap.get(energyPathTarget);
                   if (energyBlockLink == null) {
                     Platform.displayError("An energy network pathfinding entry is corrupted.\nThis could happen " +
@@ -408,9 +426,9 @@ public final class EnergyNet {
         }
       }
     }
-  }
+  }*/
   
-  private LinkedList<EnergyTarget> getValidReceivers(TileEntity tileentity, boolean flag) {
+  /*private LinkedList<EnergyTarget> getValidReceivers(TileEntity tileentity, boolean flag) {
     LinkedList<EnergyTarget> linkedlist = new LinkedList<>();
     Direction[] adirection = Direction.values();
     int i = adirection.length;
@@ -432,14 +450,15 @@ public final class EnergyNet {
         }
       }
     }
-    
+
     return linkedlist;
-  }
+  }*/
+
   
-  static class EnergyBlockLink {
+  /*static class EnergyBlockLink {
     Direction direction;
     double loss;
-    
+    Direction.
     EnergyBlockLink(Direction direction1, double d) {
       direction = direction1;
       loss = d;
@@ -485,5 +504,5 @@ public final class EnergyNet {
       tileEntity = tileentity;
       direction = direction1;
     }
-  }
+  }*/
 }
